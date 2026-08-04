@@ -5,9 +5,25 @@ sources (production runs, IoT sensor telemetry, quality inspections) flow throug
 bronze -> silver -> gold to serve the KPIs a plant manager actually uses: OEE,
 downtime, and scrap rate.
 
-Built local-first (runs anywhere on Parquet, no cloud account needed) and designed
-to move to Azure Databricks + Delta by flipping a single config switch, where it
-also gains Unity Catalog governance and Microsoft Fabric + Power BI serving.
+Built local-first (runs anywhere on Parquet, no cloud account needed) and scaled
+to millions of rows on Databricks with Delta + Unity Catalog.
+
+## Two versions in this repo
+
+This project follows a real engineering workflow: **prototype small locally, then
+scale on the cluster.**
+
+- **Local version** (`config/`, `generators/`, `pipeline/`) — clean, modular PySpark.
+  Runs on a small dataset (6 machines, 5 days) for fast iteration and easy reading.
+  Uses local Parquet so it runs with no cloud account.
+- **Databricks version** (`databricks/lakehouse_notebook.ipynb`) — the same pipeline
+  scaled to **50 machines, 90 days, ~2 million sensor rows**, running on Databricks
+  Free Edition with **Delta + Unity Catalog**. Adds window-function analytics, time-
+  series marts, a three-source join, incremental MERGE upserts, and SCD Type 2 via
+  Delta MERGE.
+
+The size difference is intentional: small data is ideal for local development;
+big data belongs on the cluster that's built to process it efficiently.
 
 ## Data sources
 
@@ -17,7 +33,7 @@ also gains Unity Catalog governance and Microsoft Fabric + Power BI serving.
 | Sensor telemetry | Semi-structured (nested JSON) | Seeded from AI4I 2020 benchmark — real speed, torque, temperature, tool wear, failure flag |
 | Quality inspections | Structured | Synthetic — pass/fail with defect codes |
 
-All three share master data (6 machines, 4 products) and join on machine_id /
+All sources share master data (machines, products) and join on machine_id /
 product_id in a star schema. MES and quality are synthetic so the sources join
 cleanly; sensor telemetry is seeded from a public benchmark. No real production
 data is used.
@@ -30,12 +46,16 @@ data is used.
 - SCD Type 2 machine dimension with full history (valid_from/valid_to/is_current);
   DataFrame logic locally, a single Delta MERGE on Databricks.
 - OEE = Availability x Performance x Quality, per run then aggregated by machine and line.
+- Window functions (Databricks): rolling 7-day OEE, running downtime, machine ranking per line.
+- Time-series marts: daily and weekly OEE trends.
+- Three-source join with a derived insight (tool-wear vs scrap correlation).
+- Incremental MERGE upserts — the industry-standard pattern for applying changes.
 - Portable Parquet <-> Delta via one env var (STORAGE_FORMAT).
 
 ## Tech stack
 
-PySpark 4, Delta Lake, Python, SQL (target: Azure Databricks, Unity Catalog,
-Microsoft Fabric, Power BI).
+PySpark 4, Delta Lake, Unity Catalog, Databricks, Python, SQL (target platform:
+Azure Databricks, Microsoft Fabric, Power BI).
 
 ## Run locally
 
@@ -52,17 +72,18 @@ Requires Python 3.10+ and Java 17.
     python -m pipeline.scd2_machine
     python -m pipeline.gold_marts
 
-## Run on Azure Databricks
+## Run on Databricks
 
-Set STORAGE_FORMAT=delta, point layer paths at ADLS Gen2, and Auto Loader replaces
-the batch reader in bronze. Gold tables register in Unity Catalog and surface to
-Power BI via a Microsoft Fabric OneLake shortcut.
+See `databricks/lakehouse_notebook.ipynb`. Upload the AI4I CSV to a Unity Catalog
+Volume, then run the cells top to bottom. Tables register in Unity Catalog under
+workspace.manufacturing and can be served to Power BI.
 
 ## Project layout
 
     config/       settings + spark session builder
     generators/   reference master data, MES, sensors (AI4I seed), quality, sim helper
     pipeline/     bronze_ingest, silver_transform, scd2_machine, gold_marts
+    databricks/   scaled Databricks notebook (2M rows, Delta, Unity Catalog)
 
 ## Attribution
 
