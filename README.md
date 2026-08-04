@@ -1,71 +1,71 @@
-# FIFA-Player-Position-Prediction
+# Manufacturing Lakehouse — Azure Databricks + Microsoft Fabric
 
-## Overview
-This project predicts a soccer player's position (**Forward, Midfielder, or Defender**) using machine learning techniques.  
-The model is trained on **FIFA datasets from FIFA 15 to FIFA 23**, leveraging player attributes such as physical, technical, and mental characteristics.
+An end-to-end medallion lakehouse for manufacturing analytics. Three factory data
+sources (production runs, IoT sensor telemetry, quality inspections) flow through
+bronze -> silver -> gold to serve the KPIs a plant manager actually uses: OEE,
+downtime, and scrap rate.
 
-The system includes:
-- A **Flask-based web application** for real-time predictions
-- An **Android UI** for mobile-based interaction
+Built local-first (runs anywhere on Parquet, no cloud account needed) and designed
+to move to Azure Databricks + Delta by flipping a single config switch, where it
+also gains Unity Catalog governance and Microsoft Fabric + Power BI serving.
 
----
+## Data sources
 
-## Features
+| Source | Type | Origin |
+|---|---|---|
+| MES production runs | Structured | Synthetic — units, downtime, scrap per run |
+| Sensor telemetry | Semi-structured (nested JSON) | Seeded from AI4I 2020 benchmark — real speed, torque, temperature, tool wear, failure flag |
+| Quality inspections | Structured | Synthetic — pass/fail with defect codes |
 
-### Big Data Processing
-- Uses **PySpark** to efficiently process large FIFA datasets.
+All three share master data (6 machines, 4 products) and join on machine_id /
+product_id in a star schema. MES and quality are synthetic so the sources join
+cleanly; sensor telemetry is seeded from a public benchmark. No real production
+data is used.
 
-### Machine Learning Model
-- Implements a **Random Forest Classifier**
-- Includes feature engineering and class balancing techniques.
+## Engineering highlights
 
-### Web-Based Deployment
-- Flask web app for real-time player position prediction.
+- Medallion architecture: bronze (raw) -> silver (clean) -> gold (business KPIs).
+- Quality gate + quarantine: bad rows routed to *_quarantine tables, never dropped.
+- Semi-structured flattening of nested sensor JSON, robust to optional fields.
+- SCD Type 2 machine dimension with full history (valid_from/valid_to/is_current);
+  DataFrame logic locally, a single Delta MERGE on Databricks.
+- OEE = Availability x Performance x Quality, per run then aggregated by machine and line.
+- Portable Parquet <-> Delta via one env var (STORAGE_FORMAT).
 
-### Android Integration
-- Android UI enables predictions directly from mobile devices via Flask API.
+## Tech stack
 
----
+PySpark 4, Delta Lake, Python, SQL (target: Azure Databricks, Unity Catalog,
+Microsoft Fabric, Power BI).
 
-## Technologies Used
+## Run locally
 
-### Machine Learning
-- Python
-- PySpark
-- Random Forest Classifier (Scikit-learn)
+Requires Python 3.10+ and Java 17.
 
-### Backend
-- Flask
+    pip install -r requirements.txt
 
-### Frontend
-- Android (Java/Kotlin)
-- HTML/CSS (Web UI)
+    python -m generators.generate_mes --days 5 --runs-per-day 12
+    python -m generators.generate_quality --inspections 600
+    python -m generators.generate_sensors --seed-file data/seed/ai4i2020.csv --readings 2000
 
+    python -m pipeline.bronze_ingest
+    python -m pipeline.silver_transform
+    python -m pipeline.scd2_machine
+    python -m pipeline.gold_marts
 
----
+## Run on Azure Databricks
 
-## Dataset
+Set STORAGE_FORMAT=delta, point layer paths at ADLS Gen2, and Auto Loader replaces
+the batch reader in bronze. Gold tables register in Unity Catalog and surface to
+Power BI via a Microsoft Fabric OneLake shortcut.
 
-**Source:** FIFA 15 – FIFA 23 datasets  
+## Project layout
 
-### Key Features Used
-- **Physical:** Pace, Strength, Stamina  
-- **Technical:** Passing, Shooting, Dribbling  
-- **Mental:** Vision, Composure, Positioning  
-- **Defensive:** Tackling, Marking  
+    config/       settings + spark session builder
+    generators/   reference master data, MES, sensors (AI4I seed), quality, sim helper
+    pipeline/     bronze_ingest, silver_transform, scd2_machine, gold_marts
 
----
+## Attribution
 
-## Installation & Setup
-
-### 1. Web Application
-
-#### Prerequisites
-- Python 3.7+
-- Flask
-- PySpark
-
-#### Steps
-```bash
-pip install flask pyspark scikit-learn pandas
-python app.py
+Sensor data seeded from the AI4I 2020 Predictive Maintenance Dataset by Stephan
+Matzka (UCI Machine Learning Repository), licensed CC BY-NC-SA 4.0. A synthetic
+benchmark dataset; used here for non-commercial, educational purposes.
