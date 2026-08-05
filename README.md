@@ -1,92 +1,116 @@
-# Manufacturing Lakehouse — Azure Databricks + Microsoft Fabric
+# Manufacturing Analytics Lakehouse — Databricks + Microsoft Fabric
 
-An end-to-end medallion lakehouse for manufacturing analytics. Three factory data
-sources (production runs, IoT sensor telemetry, quality inspections) flow through
-bronze -> silver -> gold to serve the KPIs a plant manager actually uses: OEE,
-downtime, and scrap rate.
+An end-to-end data platform for manufacturing analytics. Raw factory data flows through
+a medallion lakehouse on **Azure Databricks**, gains a **machine-learning failure-prediction**
+layer, and is served through **Microsoft Fabric** to a **Power BI** dashboard. It computes the
+KPIs a plant actually runs on — OEE, downtime by loss category, scrap, and predictive-
+maintenance risk.
 
-Built local-first (runs anywhere on Parquet, no cloud account needed) and scaled
-to millions of rows on Databricks with Delta + Unity Catalog.
+**Stack:** Azure Databricks · Delta Lake · Unity Catalog · PySpark · MLflow · Microsoft Fabric (OneLake) · Power BI · Python · SQL
 
-## Two versions in this repo
+---
 
-This project follows a real engineering workflow: **prototype small locally, then
-scale on the cluster.**
+## Capability → where it's demonstrated
 
-- **Local version** (`config/`, `generators/`, `pipeline/`) — clean, modular PySpark.
-  Runs on a small dataset (6 machines, 5 days) for fast iteration and easy reading.
-  Uses local Parquet so it runs with no cloud account.
-- **Databricks version** (`databricks/lakehouse_notebook.ipynb`) — the same pipeline
-  scaled to **50 machines, 90 days, ~2 million sensor rows**, running on Databricks
-  Free Edition with **Delta + Unity Catalog**. Adds window-function analytics, time-
-  series marts, a three-source join, incremental MERGE upserts, and SCD Type 2 via
-  Delta MERGE.
+| Capability | In this project |
+|---|---|
+| Azure Databricks pipelines | Full bronze → silver → gold medallion, run on Databricks |
+| Delta Lake | All tables are managed Delta tables (ACID, schema enforcement, MERGE, time travel) |
+| Unity Catalog governance | Tables registered under `workspace.manufacturing` (catalog / schema / table namespace) |
+| PySpark ETL/ELT | Ingestion, cleaning, joins, window functions, aggregations |
+| Microsoft Fabric | Gold layer loaded into a Fabric Lakehouse (OneLake) |
+| Power BI | 6-visual Direct Lake dashboard on the Fabric Lakehouse |
+| Machine learning | Random Forest failure prediction, MLflow-tracked |
+| Structured + semi-structured data | Flat MES tables + nested JSON sensor telemetry |
 
-The size difference is intentional: small data is ideal for local development;
-big data belongs on the cluster that's built to process it efficiently.
+---
 
-## Data sources
+## Architecture
 
-| Source | Type | Origin |
-|---|---|---|
-| MES production runs | Structured | Synthetic — units, downtime, scrap per run |
-| Sensor telemetry | Semi-structured (nested JSON) | Seeded from AI4I 2020 benchmark — real speed, torque, temperature, tool wear, failure flag |
-| Quality inspections | Structured | Synthetic — pass/fail with defect codes |
+```
+ MES runs          Sensor telemetry (AI4I)      Quality inspections
+ (structured)      (semi-structured JSON)       (structured)
+        \                  |                            /
+                      BRONZE   (raw Delta + lineage)
+                          |
+                      SILVER   (cleaned, quality-gated, per-run OEE)
+                          |
+          SCD Type 2 -----|   machine dimension history (Delta MERGE)
+                          |
+                       GOLD    (OEE, Six Big Losses, downtime Pareto, machine health)
+                          |
+              +-----------+------------+
+       ML failure-risk model       Microsoft Fabric Lakehouse (OneLake)
+       (Random Forest, MLflow)             |
+                                  Power BI Direct Lake dashboard
+```
 
-All sources share master data (machines, products) and join on machine_id /
-product_id in a star schema. MES and quality are synthetic so the sources join
-cleanly; sensor telemetry is seeded from a public benchmark. No real production
-data is used.
+---
 
 ## Engineering highlights
 
-- Medallion architecture: bronze (raw) -> silver (clean) -> gold (business KPIs).
-- Quality gate + quarantine: bad rows routed to *_quarantine tables, never dropped.
-- Semi-structured flattening of nested sensor JSON, robust to optional fields.
-- SCD Type 2 machine dimension with full history (valid_from/valid_to/is_current);
-  DataFrame logic locally, a single Delta MERGE on Databricks.
-- OEE = Availability x Performance x Quality, per run then aggregated by machine and line.
-- Window functions (Databricks): rolling 7-day OEE, running downtime, machine ranking per line.
-- Time-series marts: daily and weekly OEE trends.
-- Three-source join with a derived insight (tool-wear vs scrap correlation).
-- Incremental MERGE upserts — the industry-standard pattern for applying changes.
-- Portable Parquet <-> Delta via one env var (STORAGE_FORMAT).
+- **Medallion architecture** (bronze / silver / gold) on Databricks with Delta Lake.
+- **Six Big Losses taxonomy** — ~28k event-level downtime records categorized by loss type
+  (breakdown, changeover, minor stop, reduced speed, material starvation, planned
+  maintenance), powering a downtime Pareto and a loss-category breakdown — the analyses
+  real plants use to prioritize improvements.
+- **OEE = Availability × Performance × Quality**, computed per production run and aggregated
+  by machine, line, and shift, with benchmark-grounded realistic distributions.
+- **Window functions** — rolling 7-day OEE, running downtime, machine ranking per line.
+- **SCD Type 2** machine dimension with full history tracking via Delta MERGE.
+- **Incremental MERGE** upserts on the fact tables.
+- **Quality gates + quarantine** — invalid rows are routed aside, never silently dropped.
+- **Semi-structured handling** — nested JSON sensor telemetry flattened dynamically.
+- **Scaled** to 50 machines x 90 days x 3 shifts ~ 2M sensor rows on Databricks.
 
-## Tech stack
+---
 
-PySpark 4, Delta Lake, Unity Catalog, Databricks, Python, SQL (target platform:
-Azure Databricks, Microsoft Fabric, Power BI).
+## Machine learning — predictive maintenance
 
-## Run locally
+- **Random Forest** trained on the AI4I 2020 sensor benchmark to predict machine failure.
+- **Regularized** (`max_depth=6`) after detecting overfitting on a deeper model.
+- **Validated** — 5-fold cross-validation AUC ~ 0.93; checked for data leakage and duplicate
+  rows; reports ROC-AUC and recall rather than accuracy (the data is 3.4%-imbalanced, so
+  accuracy alone is misleading).
+- **Tracked in MLflow** (Experiments tab), with feature importance (tool wear, torque,
+  rotational speed as top predictors).
+- Feeds a **condition-based failure-risk index** that ranks machines by maintenance priority
+  (age, OEE, and failure history).
 
-Requires Python 3.10+ and Java 17.
+---
 
-    pip install -r requirements.txt
+## Serving — Microsoft Fabric + Power BI
 
-    python -m generators.generate_mes --days 5 --runs-per-day 12
-    python -m generators.generate_quality --inspections 600
-    python -m generators.generate_sensors --seed-file data/seed/ai4i2020.csv --readings 2000
+Gold tables are loaded into a **Fabric Lakehouse (OneLake)** as Delta tables and surfaced
+through a **Power BI Direct Lake** dashboard with 6 visuals:
 
-    python -m pipeline.bronze_ingest
-    python -m pipeline.silver_transform
-    python -m pipeline.scd2_machine
-    python -m pipeline.gold_marts
+1. Overall OEE KPI
+2. Top-10 at-risk machines (predictive-maintenance ranking)
+3. Average OEE by production line
+4. OEE vs failure-risk scatter (shows the inverse relationship)
+5. Downtime Pareto by reason
+6. Downtime by loss category (Availability / Performance / Quality)
 
-## Run on Databricks
+---
 
-See `databricks/lakehouse_notebook.ipynb`. Upload the AI4I CSV to a Unity Catalog
-Volume, then run the cells top to bottom. Tables register in Unity Catalog under
-workspace.manufacturing and can be served to Power BI.
+## Repo layout
 
-## Project layout
+```
+config/        settings + Spark session builder (local version)
+generators/    MES, sensor (AI4I seed), and quality data generators
+pipeline/      bronze / silver / scd2 / gold (local modular version)
+databricks/    lakehouse_notebook.ipynb -- scaled Databricks pipeline + ML
+```
 
-    config/       settings + spark session builder
-    generators/   reference master data, MES, sensors (AI4I seed), quality, sim helper
-    pipeline/     bronze_ingest, silver_transform, scd2_machine, gold_marts
-    databricks/   scaled Databricks notebook (2M rows, Delta, Unity Catalog)
+---
+
+## Data note
+
+MES and quality data are **synthetic**, grounded in published OEE benchmarks (world-class 85%,
+discrete-manufacturing average 55-65%, Six Big Losses framework). Sensor telemetry is seeded
+from the AI4I 2020 Predictive Maintenance benchmark. **No real production data is used.**
 
 ## Attribution
 
-Sensor data seeded from the AI4I 2020 Predictive Maintenance Dataset by Stephan
-Matzka (UCI Machine Learning Repository), licensed CC BY-NC-SA 4.0. A synthetic
-benchmark dataset; used here for non-commercial, educational purposes.
+AI4I 2020 Predictive Maintenance Dataset by Stephan Matzka (UCI Machine Learning Repository),
+CC BY-NC-SA 4.0 — a synthetic benchmark, used here for non-commercial, educational purposes.
